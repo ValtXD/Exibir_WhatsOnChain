@@ -1,0 +1,629 @@
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const bsv = require('bsv');
+
+const app = express();
+const PORT = 3001;
+
+app.use(express.json());
+app.use(cors());
+
+const PRIVATE_KEY_WIF = 'L1zhVFj1dJ2mS32EiysMYpMEmXE31tnTY7bwtyicGVTRwvyqVm1x';
+
+try {
+    const key = new bsv.PrivKey().fromWif(PRIVATE_KEY_WIF);
+    console.log("✅ Chave privada carregada com sucesso!");
+} catch (error) {
+    console.error("❌ Erro ao carregar a chave privada:", error.message);
+}
+
+// Função para criar a transação OP_RETURN
+const sendToWhatsOnChain = async (pacienteData) => {
+    try {
+        const key = new bsv.PrivKey().fromWif(PRIVATE_KEY_WIF);
+        const address = bsv.Address.fromPrivKey(key);
+        console.log("✅ Endereço da carteira:", address.toString());
+
+        // Buscar UTXOs
+        const { data: utxos } = await axios.get(`https://api.whatsonchain.com/v1/bsv/main/address/${address.toString()}/unspent`);
+        if (utxos.length === 0) {
+            throw new Error("❌ Sem saldo suficiente na carteira.");
+        }
+
+        const utxo = utxos[0];
+        console.log("✅ UTXO selecionado:", utxo);
+
+        // Criar a transação
+        const tx = new bsv.Tx();
+
+        // Adicionar entrada (TxIn)
+        tx.addTxIn(new bsv.TxIn({
+            prevTxId: Buffer.from(utxo.tx_hash, 'hex'),
+            outputIndex: utxo.tx_pos,
+            script: new bsv.Script(), // Script de entrada vazio (será preenchido na assinatura)
+            output: new bsv.TxOut({
+                script: bsv.Script.fromPubKeyHash(address.hashBuf), // Script de bloqueio do UTXO
+                satoshis: utxo.value,
+            }),
+        }));
+
+        // Adicionar saída OP_RETURN (TxOut)
+        const opReturnData = Buffer.from(JSON.stringify(pacienteData), 'utf8');
+        tx.addTxOut(new bsv.TxOut({
+            script: bsv.Script.fromSafeData(opReturnData), // Script OP_RETURN
+            satoshis: 0, // Valor zero para saída OP_RETURN
+        }));
+
+        // Assinar a transação
+        tx.sign(key);
+
+        console.log("✅ Transação assinada!");
+
+        // Enviar para WhatsOnChain
+        const rawTx = tx.toHex();
+        console.log("📤 Enviando transação para WhatsOnChain...");
+
+        const { data: txid } = await axios.post('https://api.whatsonchain.com/v1/bsv/main/tx/raw', { txhex: rawTx });
+
+        console.log("✅ Transação enviada com sucesso! TXID:", txid);
+        return txid;
+    } catch (error) {
+        console.error('❌ Erro ao enviar transação:', error.message);
+        throw new Error('Falha ao enviar para WhatsOnChain');
+    }
+};
+
+// Rota para enviar transação
+app.post('/api/enviar-transacao', async (req, res) => {
+    try {
+        const pacienteData = req.body;
+        console.log("📥 Recebendo dados para transação:", pacienteData);
+
+        const txid = await sendToWhatsOnChain(pacienteData);
+        res.json({ success: true, txid });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`✅ Servidor rodando na porta ${PORT}`);
+});
+=======================Recente 05/02/25 ==================
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const bsv = require('bsv');
+
+const app = express();
+const PORT = 3001;
+
+app.use(express.json());
+app.use(cors());
+
+const PRIVATE_KEY_WIF = 'L1zhVFj1dJ2mS32EiysMYpMEmXE31tnTY7bwtyicGVTRwvyqVm1x';
+
+try {
+    const key = bsv.PrivateKey.fromWIF(PRIVATE_KEY_WIF);
+    console.log("✅ Chave privada carregada com sucesso!");
+} catch (error) {
+    console.error("❌ Erro ao carregar a chave privada:", error.message);
+}
+
+// Função para criar e enviar a transação OP_RETURN
+const sendToWhatsOnChain = async (pacienteData) => {
+    try {
+        const key = bsv.PrivateKey.fromWIF(PRIVATE_KEY_WIF);
+        const address = key.toAddress().toString();
+        console.log("✅ Endereço da carteira:", address);
+
+        // Buscar UTXOs
+        const { data: utxos } = await axios.get(`https://api.whatsonchain.com/v1/bsv/main/address/${address}/unspent`);
+        if (utxos.length === 0) {
+            throw new Error("❌ Sem saldo suficiente na carteira.");
+        }
+
+        const utxo = utxos[0];
+        console.log("✅ UTXO selecionado:", utxo);
+
+        // Obter scriptPubKey
+        const { data: txDetails } = await axios.get(`https://api.whatsonchain.com/v1/bsv/main/tx/hash/${utxo.tx_hash}`);
+        const scriptPubKey = txDetails.vout[utxo.tx_pos].scriptPubKey.hex;
+        
+        if (!scriptPubKey) throw new Error("Erro: scriptPubKey não encontrado.");
+
+        // Criar a transação
+        const tx = new bsv.Transaction()
+            .from([{
+                txId: utxo.tx_hash,
+                outputIndex: utxo.tx_pos,
+                script: scriptPubKey,
+                satoshis: utxo.value,
+            }])
+            .addOutput(new bsv.Transaction.Output({
+                script: bsv.Script.buildDataOut(JSON.stringify(pacienteData)),
+                satoshis: 0,
+            }))
+            .change(address) // Retorna o troco para o mesmo endereço
+            .sign(key);
+
+        if (!tx.isFullySigned()) {
+            throw new Error("❌ A transação não foi assinada corretamente.");
+        }
+
+        // Serializar e enviar a transação
+        const rawTx = tx.serialize(); // Alternativa ao toHex()
+        console.log("📜 Raw Transaction:", rawTx);
+
+        const { data: txid } = await axios.post(
+            'https://api.whatsonchain.com/v1/bsv/main/tx/raw',
+            { txhex: rawTx }
+        );
+
+        console.log("✅ Transação enviada com sucesso! TXID:", txid);
+        return txid;
+    } catch (error) {
+        console.error("❌ Erro ao enviar transação:", error.message);
+        throw new Error("Falha ao enviar para WhatsOnChain");
+    }
+};
+
+// Rota para envio de transação
+app.post('/api/enviar-transacao', async (req, res) => {
+    try {
+        const pacienteData = req.body;
+        console.log("📥 Recebendo dados para transação:", pacienteData);
+
+        const txid = await sendToWhatsOnChain(pacienteData);
+        res.json({ success: true, txid });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`✅ Servidor rodando na porta ${PORT}`);
+});
+===================================================================
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const bsv = require('bsv');
+
+const app = express();
+const PORT = 3001;
+
+app.use(express.json());
+app.use(cors());
+
+const PRIVATE_KEY_WIF = 'L1zhVFj1dJ2mS32EiysMYpMEmXE31tnTY7bwtyicGVTRwvyqVm1x';
+
+try {
+    const key = bsv.PrivateKey.fromWIF(PRIVATE_KEY_WIF);
+    console.log("✅ Chave privada carregada com sucesso!");
+} catch (error) {
+    console.error("❌ Erro ao carregar a chave privada:", error.message);
+}
+
+// Função para criar e enviar a transação OP_RETURN
+const sendToWhatsOnChain = async (pacienteData) => {
+    try {
+        const key = bsv.PrivateKey.fromWIF(PRIVATE_KEY_WIF);
+        const address = key.toAddress().toString();
+        console.log("✅ Endereço da carteira:", address);
+
+        // Buscar UTXOs
+        const { data: utxos } = await axios.get(`https://api.whatsonchain.com/v1/bsv/main/address/${address}/unspent`);
+        if (utxos.length === 0) {
+            throw new Error("❌ Sem saldo suficiente na carteira.");
+        }
+
+        const utxo = utxos[0];
+        console.log("✅ UTXO selecionado:", utxo);
+
+        // Obter a transação completa para o UTXO
+        const { data: txData } = await axios.get(`https://api.whatsonchain.com/v1/bsv/main/tx/${utxo.tx_hash}`);
+        const scriptPubKey = txData.outputs[utxo.tx_pos].script;
+
+        if (!scriptPubKey) {
+            throw new Error("❌ scriptPubKey não encontrado na transação.");
+        }
+
+        // Criar o script OP_RETURN com os dados
+        const opReturnData = bsv.Script.buildDataOut(
+            Buffer.from(JSON.stringify(pacienteData), 'utf8')
+        );
+
+        // Criar a transação com OP_RETURN como a primeira saída
+        const tx = new bsv.Transaction()
+            .from([{
+                txId: utxo.tx_hash,
+                outputIndex: utxo.tx_pos,
+                script: bsv.Script.fromHex(scriptPubKey), // Agora usamos o script extraído da transação
+                satoshis: utxo.value,
+            }])
+            .addOutput(new bsv.Transaction.Output({
+                script: opReturnData,
+                satoshis: 0, // OP_RETURN não pode ter valor
+            }))
+            .feePerKb(1000) // Ajuste para taxa mais alta de 1000 satoshis por Kb
+            .change(address) // Garantir que o troco seja enviado corretamente
+            .sign(key);
+
+        if (!tx.isFullySigned()) {
+            throw new Error("❌ A transação não foi assinada corretamente.");
+        }
+
+        // Serializar e enviar a transação
+        const rawTx = tx.serialize();
+        console.log("📜 Raw Transaction:", rawTx);
+
+        const { data: txid } = await axios.post(
+            'https://api.whatsonchain.com/v1/bsv/main/tx/raw',
+            { txhex: rawTx }
+        );
+
+        console.log("✅ Transação enviada com sucesso! TXID:", txid);
+        return txid;
+    } catch (error) {
+        console.error("❌ Erro ao enviar transação:", error.message);
+        throw new Error("Falha ao enviar para WhatsOnChain");
+    }
+};
+
+// Rota para envio de transação
+app.post('/api/enviar-transacao', async (req, res) => {
+    try {
+        const pacienteData = req.body;
+        console.log("📥 Recebendo dados para transação:", pacienteData);
+
+        const txid = await sendToWhatsOnChain(pacienteData);
+        res.json({ success: true, txid });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`✅ Servidor rodando na porta ${PORT}`);
+});
+===============================================================
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const bsv = require('bsv');
+
+const app = express();
+const PORT = 3001;
+
+app.use(express.json());
+app.use(cors());
+
+const PRIVATE_KEY_WIF = 'L1zhVFj1dJ2mS32EiysMYpMEmXE31tnTY7bwtyicGVTRwvyqVm1x';
+
+try {
+    const key = bsv.PrivateKey.fromWIF(PRIVATE_KEY_WIF);
+    console.log("✅ Chave privada carregada com sucesso!");
+} catch (error) {
+    console.error("❌ Erro ao carregar a chave privada:", error.message);
+}
+
+// Função para criar e enviar a transação OP_RETURN
+const sendToWhatsOnChain = async (pacienteData) => {
+    try {
+        const key = bsv.PrivateKey.fromWIF(PRIVATE_KEY_WIF);
+        const address = key.toAddress().toString();
+        console.log("✅ Endereço da carteira:", address);
+
+        // Buscar UTXOs
+        const { data: utxos } = await axios.get(`https://api.whatsonchain.com/v1/bsv/main/address/${address}/unspent`);
+        if (utxos.length === 0) {
+            throw new Error("❌ Sem saldo suficiente na carteira.");
+        }
+
+        const utxo = utxos[0];
+        console.log("✅ UTXO selecionado:", utxo);
+
+        // Obter a transação completa para o UTXO
+        const { data: txData } = await axios.get(`https://api.whatsonchain.com/v1/bsv/main/tx/${utxo.tx_hash}`);
+        console.log("📜 Dados da transação:", txData);  // Logando os dados da transação para inspeção
+
+        // Verificar se a transação tem saídas suficientes
+        if (!txData.outputs || txData.outputs.length <= utxo.tx_pos) {
+            throw new Error("❌ Saída (output) da transação não encontrada ou índice incorreto.");
+        }
+
+        const scriptPubKey = txData.outputs[utxo.tx_pos].script;
+        if (!scriptPubKey) {
+            throw new Error("❌ scriptPubKey não encontrado na transação.");
+        }
+
+        // Criar o script OP_RETURN com os dados
+        const opReturnData = bsv.Script.buildDataOut(
+            Buffer.from(JSON.stringify(pacienteData), 'utf8')
+        );
+
+        // Criar a transação com OP_RETURN como a primeira saída
+        const tx = new bsv.Transaction()
+            .from([{
+                txId: utxo.tx_hash,
+                outputIndex: utxo.tx_pos,
+                script: bsv.Script.fromHex(scriptPubKey), // Agora usamos o script extraído da transação
+                satoshis: utxo.value,
+            }])
+            .addOutput(new bsv.Transaction.Output({
+                script: opReturnData,
+                satoshis: 0, // OP_RETURN não pode ter valor
+            }))
+            .feePerKb(1000) // Ajuste para taxa mais alta de 1000 satoshis por Kb
+            .change(address) // Garantir que o troco seja enviado corretamente
+            .sign(key);
+
+        if (!tx.isFullySigned()) {
+            throw new Error("❌ A transação não foi assinada corretamente.");
+        }
+
+        // Serializar e enviar a transação
+        const rawTx = tx.serialize();
+        console.log("📜 Raw Transaction:", rawTx);
+
+        const { data: txid } = await axios.post(
+            'https://api.whatsonchain.com/v1/bsv/main/tx/raw',
+            { txhex: rawTx }
+        );
+
+        console.log("✅ Transação enviada com sucesso! TXID:", txid);
+        return txid;
+    } catch (error) {
+        console.error("❌ Erro ao enviar transação:", error.message);
+        throw new Error("Falha ao enviar para WhatsOnChain");
+    }
+};
+
+// Rota para envio de transação
+app.post('/api/enviar-transacao', async (req, res) => {
+    try {
+        const pacienteData = req.body;
+        console.log("📥 Recebendo dados para transação:", pacienteData);
+
+        const txid = await sendToWhatsOnChain(pacienteData);
+        res.json({ success: true, txid });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`✅ Servidor rodando na porta ${PORT}`);
+});
+===========================================================
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const bsv = require('bsv');
+
+const app = express();
+const PORT = 3001;
+
+app.use(express.json());
+app.use(cors());
+
+const PRIVATE_KEY_WIF = 'L1zhVFj1dJ2mS32EiysMYpMEmXE31tnTY7bwtyicGVTRwvyqVm1x';
+
+try {
+    const key = bsv.PrivateKey.fromWIF(PRIVATE_KEY_WIF);
+    console.log("✅ Chave privada carregada com sucesso!");
+} catch (error) {
+    console.error("❌ Erro ao carregar a chave privada:", error.message);
+}
+
+// Função para criar e enviar a transação OP_RETURN
+const sendToWhatsOnChain = async (pacienteData) => {
+    try {
+        const key = bsv.PrivateKey.fromWIF(PRIVATE_KEY_WIF);
+        const address = key.toAddress().toString();
+        console.log("✅ Endereço da carteira:", address);
+
+        // Buscar UTXOs
+        const { data: utxos } = await axios.get(`https://api.whatsonchain.com/v1/bsv/main/address/${address}/unspent`);
+        if (utxos.length === 0) {
+            throw new Error("❌ Sem saldo suficiente na carteira.");
+        }
+
+        const utxo = utxos[0];
+        console.log("✅ UTXO selecionado:", utxo);
+
+        // Obter a transação completa para o UTXO
+        const { data: txData } = await axios.get(`https://api.whatsonchain.com/v1/bsv/main/tx/${utxo.tx_hash}`);
+
+        if (!txData.vout || txData.vout.length <= utxo.tx_pos) {
+            throw new Error("❌ Saída (output) da transação não encontrada ou índice incorreto.");
+        }
+
+        const scriptPubKey = txData.vout[utxo.tx_pos].scriptPubKey;
+        if (!scriptPubKey || !scriptPubKey.hex) {
+            throw new Error("❌ scriptPubKey não encontrado ou inválido.");
+        }
+
+        console.log("🔑 scriptPubKey da saída selecionada:", scriptPubKey.hex);
+
+        // Criar um JSON menor para testar OP_RETURN
+        const opReturnData = bsv.Script.buildDataOut(
+            Buffer.from(JSON.stringify({ nome: pacienteData.nome, cpf: pacienteData.cpf }), 'utf8')
+        );
+
+        // Criar a transação
+        const tx = new bsv.Transaction()
+            .from([{
+                txId: utxo.tx_hash,
+                outputIndex: utxo.tx_pos,
+                script: bsv.Script.fromHex(scriptPubKey.hex),
+                satoshis: utxo.value,
+            }])
+            .addOutput(new bsv.Transaction.Output({
+                script: opReturnData,
+                satoshis: 0, // OP_RETURN não pode ter valor
+            }))
+            .feePerKb(500) // Reduzi a taxa para evitar erro 400
+            .change(address) // Troco para a carteira original
+            .sign(key);
+
+        if (!tx.isFullySigned()) {
+            throw new Error("❌ A transação não foi assinada corretamente.");
+        }
+
+        // Validar taxa e troco
+        console.log("📝 Taxa estimada:", tx.getFee(), "satoshis");
+        console.log("💰 Troco:", tx.getChangeOutput() ? tx.getChangeOutput().satoshis : 0, "satoshis");
+
+        // Serializar e enviar a transação
+        const rawTx = tx.serialize();
+        console.log("📜 Raw Transaction:", rawTx);
+
+        const { data: txid } = await axios.post(
+            'https://api.whatsonchain.com/v1/bsv/main/tx/raw',
+            { txhex: rawTx }
+        );
+
+        console.log("✅ Transação enviada com sucesso! TXID:", txid);
+        return txid;
+    } catch (error) {
+        console.error("❌ Erro ao enviar transação:", error.message);
+        throw new Error("Falha ao enviar para WhatsOnChain");
+    }
+};
+
+// Rota para envio de transação
+app.post('/api/enviar-transacao', async (req, res) => {
+    try {
+        const pacienteData = req.body;
+        console.log("📥 Recebendo dados para transação:", pacienteData);
+
+        const txid = await sendToWhatsOnChain(pacienteData);
+        res.json({ success: true, txid });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`✅ Servidor rodando na porta ${PORT}`);
+});
+==========================================================06/02/25
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const bsv = require('bsv');
+
+const app = express();
+const PORT = 3001;
+
+app.use(express.json());
+app.use(cors());
+
+const PRIVATE_KEY_WIF = 'L1zhVFj1dJ2mS32EiysMYpMEmXE31tnTY7bwtyicGVTRwvyqVm1x';
+
+try {
+    const key = bsv.PrivateKey.fromWIF(PRIVATE_KEY_WIF);
+    console.log("✅ Chave privada carregada com sucesso!");
+} catch (error) {
+    console.error("❌ Erro ao carregar a chave privada:", error.message);
+}
+
+// Função para criar e enviar a transação OP_RETURN
+const sendToWhatsOnChain = async (pacienteData) => {
+    try {
+        const key = bsv.PrivateKey.fromWIF(PRIVATE_KEY_WIF);
+        const address = key.toAddress().toString();
+        console.log("✅ Endereço da carteira:", address);
+
+        // Buscar UTXOs
+        const { data: utxos } = await axios.get(`https://api.whatsonchain.com/v1/bsv/main/address/${address}/unspent`);
+        if (utxos.length === 0) {
+            throw new Error("❌ Sem saldo suficiente na carteira.");
+        }
+
+        const utxo = utxos[0];
+        console.log("✅ UTXO selecionado:", utxo);
+
+        // Obter a transação completa para o UTXO
+        const { data: txData } = await axios.get(`https://api.whatsonchain.com/v1/bsv/main/tx/${utxo.tx_hash}`);
+
+        if (!txData.vout || txData.vout.length <= utxo.tx_pos) {
+            throw new Error("❌ Saída (output) da transação não encontrada ou índice incorreto.");
+        }
+
+        const scriptPubKey = txData.vout[utxo.tx_pos].scriptPubKey;
+        if (!scriptPubKey || !scriptPubKey.hex) {
+            throw new Error("❌ scriptPubKey não encontrado ou inválido.");
+        }
+
+        console.log("🔑 scriptPubKey da saída selecionada:", scriptPubKey.hex);
+
+        // Criar um JSON menor para testar OP_RETURN
+        const opReturnData = bsv.Script.buildDataOut(
+            Buffer.from(JSON.stringify({ nome: pacienteData.nome, cpf: pacienteData.cpf }), 'utf8')
+        );
+
+        // Criar a transação
+        const tx = new bsv.Transaction()
+            .from([{
+                txId: utxo.tx_hash,
+                outputIndex: utxo.tx_pos,
+                script: bsv.Script.fromHex(scriptPubKey.hex),
+                satoshis: utxo.value,
+            }])
+            .addOutput(new bsv.Transaction.Output({
+                script: opReturnData,
+                satoshis: 0, // OP_RETURN não pode ter valor
+            }))
+            .feePerKb(500) // Reduzi a taxa para evitar erro 400
+            .change(address) // Troco para a carteira original
+            .sign(key);
+
+        if (!tx.isFullySigned()) {
+            throw new Error("❌ A transação não foi assinada corretamente.");
+        }
+
+        // Validar taxa e troco
+        console.log("📝 Taxa estimada:", tx.getFee(), "satoshis");
+        console.log("💰 Troco:", tx.getChangeOutput() ? tx.getChangeOutput().satoshis : 0, "satoshis");
+
+        // Serializar e enviar a transação
+        const rawTx = tx.serialize();
+        console.log("📜 Raw Transaction:", rawTx);
+
+        const { data: txid } = await axios.post(
+            'https://api.whatsonchain.com/v1/bsv/main/tx/raw',
+            { txhex: rawTx }
+        );
+
+        console.log("✅ Transação enviada com sucesso! TXID:", txid);
+        return txid;
+    } catch (error) {
+        console.error("❌ Erro ao enviar transação:", error.message);
+        throw new Error("Falha ao enviar para WhatsOnChain");
+    }
+};
+
+// Rota para envio de transação
+app.post('/api/enviar-transacao', async (req, res) => {
+    try {
+        const pacienteData = req.body;
+        console.log("📥 Recebendo dados para transação:", pacienteData);
+
+        const txid = await sendToWhatsOnChain(pacienteData);
+        res.json({ success: true, txid });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`✅ Servidor rodando na porta ${PORT}`);
+});
